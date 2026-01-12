@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>Integrated Disaster Console</title>
+    <style>
+        :root {
+            --bg-color: #05070a;
+            --panel-bg: #1c2128;
+            --accent-red: #ff3333;
+            --accent-orange: #ff9900;
+            --accent-yellow: #ffdd00;
+            --accent-blue: #00ccff;
+            --accent-green: #2ea043;
+            --text-main: #adbac7;
+        }
+        body { font-family: 'Segoe UI', sans-serif; background: var(--bg-color); color: var(--text-main); margin: 0; padding: 20px; }
+        h1 { text-align: center; color: #fff; text-transform: uppercase; letter-spacing: 2px; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 15px; }
+        .panel { background: var(--panel-bg); border: 1px solid #444c56; border-radius: 10px; padding: 15px; }
+        h2 { font-size: 1.1rem; margin-top: 0; border-bottom: 1px solid #444c56; padding-bottom: 8px; text-align: center; }
+        
+        .setting-row { display: flex; align-items: center; justify-content: space-between; padding: 5px 8px; background: #22272e; border-radius: 4px; margin-bottom: 4px; font-size: 0.85rem; }
+        input[type="file"] { width: 120px; font-size: 0.7rem; }
+        
+        .section-eew { border-top: 4px solid var(--accent-orange); }
+        .section-tsunami { border-top: 4px solid var(--accent-blue); }
+        .section-shindo { border-top: 4px solid #fff; }
+
+        #monitor-btn { grid-column: 1 / -1; padding: 15px; font-size: 1.2rem; font-weight: bold; cursor: pointer; border: none; border-radius: 8px; background: var(--accent-green); color: white; margin-top: 10px; }
+        #monitor-btn:disabled { background: #373e47; color: #768390; }
+
+        #log-panel { grid-column: 1 / -1; background: #000; border: 1px solid #444c56; border-radius: 8px; padding: 10px; height: 180px; overflow-y: auto; font-family: monospace; color: #00ff00; font-size: 0.85rem; margin-top: 15px; }
+        .log-critical { color: var(--accent-red); font-weight: bold; background: rgba(255,0,0,0.1); }
+        .log-warn { color: var(--accent-orange); }
+        .log-info { color: var(--accent-blue); }
+    </style>
+</head>
+<body>
+
+<h1>🚨 Disaster Management Console</h1>
+
+<div class="grid">
+    <div class="panel section-eew">
+        <h2 style="color: var(--accent-orange);">緊急地震速報 (EEW)</h2>
+        <div class="setting-row"><span>予報 (Forecast)</span><input type="file" id="file-eew-f"></div>
+        <div class="setting-row"><span>警報 (Warning)</span><input type="file" id="file-eew-w"></div>
+    </div>
+
+    <div class="panel section-tsunami">
+        <h2 style="color: var(--accent-blue);">津波情報</h2>
+        <div class="setting-row"><span>大津波警報</span><input type="file" id="file-tsunami-major"></div>
+        <div class="setting-row"><span>津波警報</span><input type="file" id="file-tsunami-warn"></div>
+        <div class="setting-row"><span>津波注意報</span><input type="file" id="file-tsunami-adv"></div>
+        <div class="setting-row"><span>津波予報(若干)</span><input type="file" id="file-tsunami-forecast"></div>
+        <div class="setting-row"><span>解除</span><input type="file" id="file-tsunami-clear"></div>
+    </div>
+
+    <div class="panel section-shindo">
+        <h2>各地の震度</h2>
+        <div id="shindo-inputs"></div>
+    </div>
+
+    <button id="monitor-btn">ALL SYSTEMS ONLINE (音声有効化)</button>
+    <div id="log-panel">システム待機中...音声ファイルを選択してください。</div>
+</div>
+
+<script>
+    const audioStore = {};
+    let lastIds = { eew: "", eq: "", tsunami: "" };
+
+    // 震度UI生成
+    const shindos = ["1", "2", "3", "4", "5弱", "5強", "6弱", "6強", "7"];
+    shindos.forEach(s => {
+        const row = document.createElement('div');
+        row.className = 'setting-row';
+        row.innerHTML = `<span>震度${s}</span><input type="file" id="file-${s}">`;
+        document.getElementById('shindo-inputs').appendChild(row);
+        document.getElementById(`file-${s}`).addEventListener('change', (e) => saveFile(s, e));
+    });
+
+    // 各種ファイル保存
+    const fileMappings = {
+        'file-eew-f': 'eew-f', 'file-eew-w': 'eew-w',
+        'file-tsunami-major': 'MajorWarning', 'file-tsunami-warn': 'Warning',
+        'file-tsunami-adv': 'Advisory', 'file-tsunami-forecast': 'Forecast', 'file-tsunami-clear': 'Clear'
+    };
+    Object.entries(fileMappings).forEach(([id, key]) => {
+        document.getElementById(id).addEventListener('change', (e) => saveFile(key, e));
+    });
+
+    function saveFile(key, e) {
+        const file = e.target.files[0];
+        if (file) {
+            if (audioStore[key]) URL.revokeObjectURL(audioStore[key]);
+            audioStore[key] = URL.createObjectURL(file);
+            addLog(`Ready: ${key}`);
+        }
+    }
+
+    function addLog(msg, className = '') {
+        const log = document.getElementById('log-panel');
+        const div = document.createElement('div');
+        div.className = className;
+        div.innerHTML = `[${new Date().toLocaleTimeString()}] ${msg}`;
+        log.prepend(div);
+    }
+
+    function play(key) {
+        if (audioStore[key]) new Audio(audioStore[key]).play();
+        else addLog(`⚠️ 音声未設定: ${key}`, 'log-warn');
+    }
+
+    // --- API 監視 ---
+
+    async function checkTsunami() {
+        try {
+            const res = await fetch('https://api.tdiys.jp/v1/tsunami');
+            const data = await res.json();
+            if (data && data.length > 0) {
+                const latest = data[0];
+                if (latest.id !== lastIds.tsunami) {
+                    lastIds.tsunami = latest.id;
+                    // 解除判定
+                    if (latest.cancelled) {
+                        addLog("【津波情報】津波注意報・警報は解除されました。", "log-info");
+                        play('Clear');
+                        return;
+                    }
+                    // 最大種別判定
+                    const type = latest.maxGrade; // MajorWarning, Warning, Advisory, Forecast
+                    addLog(`【津波発表】種類: ${type}`, "log-critical");
+                    play(type);
+                }
+            }
+        } catch (e) { console.error("Tsunami API Error", e); }
+    }
+
+    async function checkEEW() {
+        try {
+            const res = await fetch('https://api.tdiys.jp/v1/eew');
+            const data = await res.json();
+            if (data && data.length > 0) {
+                const latest = data[0];
+                const cid = `${latest.id}_${latest.serial}`;
+                if (cid !== lastIds.eew) {
+                    lastIds.eew = cid;
+                    const type = latest.isWarning ? "eew-w" : "eew-f";
+                    addLog(`【EEW】第${latest.serial}報: ${latest.hypocenter}`, latest.isWarning ? 'log-critical' : 'log-warn');
+                    play(type);
+                }
+            }
+        } catch (e) { }
+    }
+
+    async function checkEq() {
+        try {
+            const res = await fetch('https://api.tdiys.jp/v1/earthquake');
+            const data = await res.json();
+            if (data && data.length > 0) {
+                const latest = data[0];
+                if (latest.id !== lastIds.eq) {
+                    lastIds.eq = latest.id;
+                    const shindo = latest.maxIntensity.replace('5-', '5弱').replace('5+', '5強').replace('6-', '6弱').replace('6+', '6強');
+                    addLog(`【震度】${latest.hypocenter} 震度${shindo}`);
+                    play(shindo);
+                }
+            }
+        } catch (e) { }
+    }
+
+    document.getElementById('monitor-btn').addEventListener('click', function() {
+        this.disabled = true;
+        this.innerText = "MONITORING ACTIVE";
+        addLog("▶ 全機能の監視を開始しました");
+        setInterval(checkEEW, 2000);
+        setInterval(checkTsunami, 5000);
+        setInterval(checkEq, 5000);
+    });
+</script>
+</body>
+</html>
